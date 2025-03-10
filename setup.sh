@@ -87,6 +87,18 @@ sudo systemctl daemon-reload
 sudo systemctl enable consul
 sudo systemctl start consul
 
+# Wait for Consul to be reachable
+echo "Waiting for Consul to be reachable..."
+while ! netcat -z 127.0.0.1 8500 > /dev/null 2>&1; do
+  sleep 1
+done
+
+# Wait for Consul cluster leader to be elected
+echo "Waiting for Consul cluster leader to be elected..."
+while ! consul kv get -recurse / > /dev/null 2>&1; do
+  sleep 1
+done
+
 # Bootstrap Consul ACL and get bootstrap token
 CONSUL_SECRET_ID=$(consul acl bootstrap -format=json | jq -r '.SecretID')
 
@@ -152,6 +164,13 @@ sudo systemctl daemon-reload
 sudo systemctl enable nomad
 sudo systemctl start nomad
 
+# Wait for Nomad to be reachable
+echo "Waiting for Nomad to be reachable..."
+while ! netcat -z 127.0.0.1 4646 > /dev/null 2>&1; do
+  sleep 1
+done
+
+# Bootstrap Nomad ACL and get bootstrap token
 NOMAD_SECRET_ID=$(nomad acl bootstrap -json | jq -r '.SecretID')
 
 if [ -z "${NOMAD_SECRET_ID}" ]; then
@@ -163,7 +182,7 @@ fi
 sudo ufw allow ssh
 sudo ufw allow 4646/tcp
 sudo ufw allow 8500/tcp
-sudo ufw enable
+sudo ufw --force enable
 
 echo " "
 echo "----------------------------------------"
