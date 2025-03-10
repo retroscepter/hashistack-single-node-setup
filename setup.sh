@@ -5,7 +5,7 @@ set -e
 # Update package lists and install prerequisites
 sudo apt update
 sudo apt upgrade -y
-sudo apt install -y wget curl gpg coreutils ca-certificates
+sudo apt install -y wget curl gpg coreutils ca-certificates jq
 
 # Add HashiCorp GPG key and repository
 wget -O- https://apt.releases.hashicorp.com/gpg | sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
@@ -29,6 +29,11 @@ sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plug
 # Get private IP
 PRIVATE_IP=$(hostname -I | awk '{print $1}')
 
+if [ -z "${PRIVATE_IP}" ]; then
+  echo "Failed to get private IP"
+  exit 1
+fi
+
 # Create Consul configuration directory
 sudo mkdir -p /etc/consul.d
 sudo chmod a+w /etc/consul.d
@@ -41,12 +46,22 @@ sudo chmod 777 /opt/consul/data
 cat <<EOF | sudo tee /etc/consul.d/consul.hcl
 datacenter = "dc1"
 data_dir = "/opt/consul/data"
-log_level = "INFO"
-server = true
-bootstrap_expect = 1
+
 bind_addr = "${PRIVATE_IP}"
 client_addr = "0.0.0.0"
+
+log_level = "INFO"
+
+server = true
+bootstrap = true
+
 ui = true
+
+acl = {
+  enabled = true
+  default_policy = "deny"
+  enable_token_persistence = true
+}
 EOF
 
 # Create Consul service file
@@ -71,6 +86,14 @@ EOF
 sudo systemctl daemon-reload
 sudo systemctl enable consul
 sudo systemctl start consul
+
+# Bootstrap Consul ACL and get bootstrap token
+CONSUL_SECRET_ID=$(consul acl bootstrap -format=json | jq -r '.SecretID')
+
+if [ -z "${CONSUL_SECRET_ID}" ]; then
+  echo "Failed to bootstrap Consul ACL"
+  exit 1
+fi
 
 # Create Nomad configuration directory
 sudo mkdir -p /etc/nomad.d
@@ -98,6 +121,11 @@ client {
 
 consul {
   address = "${PRIVATE_IP}:8500"
+  token = "${CONSUL_SECRET_ID}"
+}
+
+acl = {
+  enabled = true
 }
 EOF
 
@@ -124,11 +152,17 @@ sudo systemctl daemon-reload
 sudo systemctl enable nomad
 sudo systemctl start nomad
 
+NOMAD_SECRET_ID=$(nomad acl bootstrap -json | jq -r '.SecretID')
+
 # Open necessary firewall ports
 sudo ufw allow ssh
-sudo ufw allow 4646/tcp   # Nomad HTTP API
-sudo ufw allow 8500/tcp   # Consul HTTP API
+sudo ufw allow 4646/tcp
+sudo ufw allow 8500/tcp
 sudo ufw enable
 
 echo "Access Nomad UI at http://${PRIVATE_IP}:4646"
 echo "Access Consul UI at http://${PRIVATE_IP}:8500"
+
+echo "WARNING: Store these tokens in a secure location, you will not be able to access them again!"
+echo "Nomad bootstrap token: ${NOMAD_SECRET_ID}"
+echo "Consul bootstrap token: ${CONSUL_SECRET_ID}"
