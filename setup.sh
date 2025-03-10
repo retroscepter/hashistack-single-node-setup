@@ -34,18 +34,21 @@ if [ -z "${PRIVATE_IP}" ]; then
   exit 1
 fi
 
+CONSUL_CONFIG_DIR="/etc/consul.d"
+CONSUL_DATA_DIR="/opt/consul/data"
+
 # Create Consul configuration directory
-sudo mkdir -p /etc/consul.d
-sudo chmod a+w /etc/consul.d
+sudo mkdir -p ${CONSUL_CONFIG_DIR}
+sudo chmod a+w ${CONSUL_CONFIG_DIR}
 
 # Create Consul data directory
-sudo mkdir -p /opt/consul/data
-sudo chmod 777 /opt/consul/data
+sudo mkdir -p ${CONSUL_DATA_DIR}
+sudo chmod 777 ${CONSUL_DATA_DIR}
 
 # Create Consul configuration file
-cat <<EOF | sudo tee /etc/consul.d/consul.hcl > /dev/null
+cat <<EOF | sudo tee ${CONSUL_CONFIG_DIR}/consul.hcl > /dev/null
 datacenter = "dc1"
-data_dir = "/opt/consul/data"
+data_dir = "${CONSUL_DATA_DIR}"
 
 bind_addr = "${PRIVATE_IP}"
 client_addr = "0.0.0.0"
@@ -72,7 +75,7 @@ Requires=network-online.target
 After=network-online.target
 
 [Service]
-ExecStart=/usr/bin/consul agent -config-dir=/etc/consul.d/
+ExecStart=/usr/bin/consul agent -config-dir=${CONSUL_CONFIG_DIR}
 ExecReload=/bin/kill -HUP \$MAINPID
 KillSignal=SIGTERM
 Restart=on-failure
@@ -107,17 +110,20 @@ if [ -z "${CONSUL_SECRET_ID}" ]; then
   exit 1
 fi
 
+NOMAD_CONFIG_DIR="/etc/nomad.d"
+NOMAD_DATA_DIR="/opt/nomad/data"
+
 # Create Nomad configuration directory
-sudo mkdir -p /etc/nomad.d
-sudo chmod a+w /etc/nomad.d
+sudo mkdir -p ${NOMAD_CONFIG_DIR}
+sudo chmod a+w ${NOMAD_CONFIG_DIR}
 
 # Create Nomad data directory
-sudo mkdir -p /opt/nomad/data
-sudo chmod 777 /opt/nomad/data
+sudo mkdir -p ${NOMAD_DATA_DIR}
+sudo chmod 777 ${NOMAD_DATA_DIR}
 
 # Create Nomad configuration file
-cat <<EOF | sudo tee /etc/nomad.d/nomad.hcl > /dev/null
-data_dir  = "/opt/nomad/data"
+cat <<EOF | sudo tee ${NOMAD_CONFIG_DIR}/nomad.hcl > /dev/null
+data_dir  = "${NOMAD_DATA_DIR}"
 bind_addr = "0.0.0.0"
 
 server {
@@ -149,7 +155,7 @@ Requires=network-online.target
 After=network-online.target
 
 [Service]
-ExecStart=/usr/bin/nomad agent -config=/etc/nomad.d/
+ExecStart=/usr/bin/nomad agent -config=${NOMAD_CONFIG_DIR}/nomad.hcl
 ExecReload=/bin/kill -HUP \$MAINPID
 KillSignal=SIGINT
 Restart=on-failure
@@ -186,14 +192,22 @@ sudo ufw --force enable
 
 echo " "
 echo "----------------------------------------"
+echo "Setup complete!"
+echo "----------------------------------------"
+echo " "
 echo "Access Nomad UI at http://${PRIVATE_IP}:4646"
 echo "Access Consul UI at http://${PRIVATE_IP}:8500"
+echo " "
 echo "----------------------------------------"
+echo " "
 echo "WARNING: Store these tokens in a secure location, you will not be able to access them again!"
 echo " "
 echo "Nomad bootstrap token: ${NOMAD_SECRET_ID}"
 echo "Consul bootstrap token: ${CONSUL_SECRET_ID}"
-echo "----------------------------------------"
-echo "Installation complete!"
+echo " "
 echo "----------------------------------------"
 echo " "
+echo "Nomad configuration: ${NOMAD_CONFIG_DIR}/nomad.hcl"
+echo "Consul configuration: ${CONSUL_CONFIG_DIR}/consul.hcl"
+echo " "
+echo "----------------------------------------"
