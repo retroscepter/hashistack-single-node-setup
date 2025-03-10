@@ -43,7 +43,7 @@ sudo mkdir -p /opt/consul/data
 sudo chmod 777 /opt/consul/data
 
 # Create Consul configuration file
-cat <<EOF | sudo tee /etc/consul.d/consul.hcl
+cat <<EOF | sudo tee /etc/consul.d/consul.hcl > /dev/null
 datacenter = "dc1"
 data_dir = "/opt/consul/data"
 
@@ -65,7 +65,7 @@ acl = {
 EOF
 
 # Create Consul service file
-cat <<EOF | sudo tee /etc/systemd/system/consul.service
+cat <<EOF | sudo tee /etc/systemd/system/consul.service > /dev/null
 [Unit]
 Description=Consul Agent
 Requires=network-online.target
@@ -104,7 +104,7 @@ sudo mkdir -p /opt/nomad/data
 sudo chmod 777 /opt/nomad/data
 
 # Create Nomad configuration file
-cat <<EOF | sudo tee /etc/nomad.d/nomad.hcl
+cat <<EOF | sudo tee /etc/nomad.d/nomad.hcl > /dev/null
 data_dir  = "/opt/nomad/data"
 bind_addr = "0.0.0.0"
 
@@ -130,7 +130,7 @@ acl = {
 EOF
 
 # Create Nomad service file
-cat <<EOF | sudo tee /etc/systemd/system/nomad.service
+cat <<EOF | sudo tee /etc/systemd/system/nomad.service > /dev/null
 [Unit]
 Description=Nomad Agent
 Requires=network-online.target
@@ -154,15 +154,27 @@ sudo systemctl start nomad
 
 NOMAD_SECRET_ID=$(nomad acl bootstrap -json | jq -r '.SecretID')
 
+if [ -z "${NOMAD_SECRET_ID}" ]; then
+  echo "Failed to bootstrap Nomad ACL"
+  exit 1
+fi
+
 # Open necessary firewall ports
 sudo ufw allow ssh
 sudo ufw allow 4646/tcp
 sudo ufw allow 8500/tcp
 sudo ufw enable
 
+echo " "
+echo "----------------------------------------"
 echo "Access Nomad UI at http://${PRIVATE_IP}:4646"
 echo "Access Consul UI at http://${PRIVATE_IP}:8500"
-
+echo "----------------------------------------"
 echo "WARNING: Store these tokens in a secure location, you will not be able to access them again!"
+echo " "
 echo "Nomad bootstrap token: ${NOMAD_SECRET_ID}"
 echo "Consul bootstrap token: ${CONSUL_SECRET_ID}"
+echo "----------------------------------------"
+echo "Installation complete!"
+echo "----------------------------------------"
+echo " "
