@@ -19,6 +19,14 @@ TRAEFIK_VERSION="3.3.4"
 TRAEFIK_CONFIG_DIR="/etc/traefik"
 TRAEFIK_LOG_DIR="/var/log/traefik"
 
+# Get private IP
+PRIVATE_IP=$(hostname -I | awk '{print $1}')
+
+if [ -z "${PRIVATE_IP}" ]; then
+  echo "Failed to get private IP"
+  exit 1
+fi
+
 read -p "LetsEncrypt email: " LETSENCRYPT_EMAIL
 read -p "Nomad dashboard host: " NOMAD_DASHBOARD_HOST
 read -p "Consul dashboard host: " CONSUL_DASHBOARD_HOST
@@ -71,13 +79,62 @@ sudo chmod +x ./traefik/traefik
 sudo mv ./traefik/traefik /usr/bin/
 rm -rf ./traefik
 
-# Get private IP
-PRIVATE_IP=$(hostname -I | awk '{print $1}')
+# Disable systemd-resolved
+sudo systemctl stop systemd-resolved
+sudo systemctl disable systemd-resolved
 
-if [ -z "${PRIVATE_IP}" ]; then
-  echo "Failed to get private IP"
-  exit 1
-fi
+# Create custom resolved.conf file
+cat <<EOF | sudo tee /etc/systemd/resolved.conf > /dev/null
+# This file is managed by man:systemd-resolved(8). Do not edit.
+#
+# This is a dynamic resolv.conf file for connecting local clients directly to
+# all known uplink DNS servers. This file lists all configured search domains.
+#
+# Third party programs must not access this file directly, but only through the
+# symlink at /etc/resolv.conf. To manage man:resolv.conf(5) in a different way,
+# replace this symlink by a static file or a different symlink.
+#
+# See man:systemd-resolved.service(8) for details about the supported modes of
+# operation for /etc/resolv.conf.
+
+# Docker bridge ip
+nameserver 172.17.0.1
+nameserver 127.0.0.1
+nameserver 8.8.8.8
+nameserver 8.8.4.4
+EOF
+
+# Create custom resolv.conf file
+cat <<EOF | sudo tee /etc/resolv.conf > /dev/null
+#  This file is part of systemd.
+#
+#  systemd is free software; you can redistribute it and/or modify it
+#  under the terms of the GNU Lesser General Public License as published by
+#  the Free Software Foundation; either version 2.1 of the License, or
+#  (at your option) any later version.
+#
+# Entries in this file show the compile time defaults.
+# You can change settings by editing this file.
+# Defaults can be restored by simply deleting this file.
+#
+# See resolved.conf(5) for details
+
+[Resolve]
+DNS=127.0.0.1
+Domains=~consul
+#FallbackDNS=
+#Domains=
+#LLMNR=no
+#MulticastDNS=no
+#DNSSEC=no
+#DNSOverTLS=no
+#Cache=no-negative
+DNSStubListener=yes
+#ReadEtcHosts=yes
+EOF
+
+# Create symlink to systemd-resolved
+sudo ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf
 
 # Create Consul configuration directory
 sudo mkdir -p ${CONSUL_CONFIG_DIR}
@@ -90,22 +147,33 @@ sudo chmod 777 ${CONSUL_DATA_DIR}
 # Create Consul configuration file
 cat <<EOF | sudo tee ${CONSUL_CONFIG_DIR}/consul.hcl > /dev/null
 datacenter = "dc1"
+
+log_level = "INFO"
+
 data_dir = "${CONSUL_DATA_DIR}"
 
 bind_addr = "${PRIVATE_IP}"
 client_addr = "0.0.0.0"
 
-log_level = "INFO"
+ports {
+  dns = 53
+}
+
+recursors = [ "8.8.8.8", "8.8.4.4" ]
 
 server = true
-bootstrap = true
-
 ui = true
+
+bootstrap = true
 
 acl = {
   enabled = true
   default_policy = "deny"
   enable_token_persistence = true
+
+  tokens {
+    dns = "CONSUL_DNS_SECRET_ID"
+  }
 }
 EOF
 
@@ -117,6 +185,7 @@ Requires=network-online.target
 After=network-online.target
 
 [Service]
+Environment=CONSUL_ALLOW_PRIVILEGED_PORTS=true
 ExecStart=/usr/bin/consul agent -config-dir=${CONSUL_CONFIG_DIR}
 ExecReload=/bin/kill -HUP \$MAINPID
 KillSignal=SIGTERM
@@ -153,6 +222,20 @@ if [ -z "${CONSUL_SECRET_ID}" ]; then
 fi
 
 echo ${CONSUL_SECRET_ID} >> ./consul-bootstrap-token.txt
+
+export CONSUL_HTTP_TOKEN=${CONSUL_SECRET_ID}
+
+# Create Consul DNS token
+CONSUL_DNS_SECRET_ID=$(consul acl token create -description "DNS Token" -format json -templated-policy "builtin/dns" | jq -r '.SecretID')
+
+if [ -z "${CONSUL_DNS_SECRET_ID}" ]; then
+  echo "Failed to create Consul DNS token"
+  exit 1
+fi
+
+sudo sed -i "s/CONSUL_DNS_SECRET_ID/${CONSUL_DNS_SECRET_ID}/g" ${CONSUL_CONFIG_DIR}/consul.hcl
+
+sudo systemctl restart consul
 
 # Create Nomad configuration directory
 sudo mkdir -p ${NOMAD_CONFIG_DIR}
@@ -227,18 +310,15 @@ fi
 
 echo ${NOMAD_SECRET_ID} >> ./nomad-bootstrap-token.txt
 
-# Create Registry group and user
-sudo groupadd -g 500 docker-registry
+# Create Docker registry user
 sudo useradd \
-  -g docker-registry \
-  --no-user-group \
+  -U \
   --no-create-home \
   --shell /bin/false \
   --system \
-  --uid 500 \
   docker-registry
 
-# Create Registry directories and set permissions
+# Create Docker registry directories and set permissions
 sudo mkdir -p ${REGISTRY_CONFIG_DIR}
 sudo chmod 755 ${REGISTRY_CONFIG_DIR}
 sudo chown -R docker-registry:docker-registry ${REGISTRY_CONFIG_DIR}
@@ -246,7 +326,7 @@ sudo mkdir -p ${REGISTRY_DATA_DIR}
 sudo chmod 755 ${REGISTRY_DATA_DIR}
 sudo chown -R docker-registry:docker-registry ${REGISTRY_DATA_DIR}
 
-# Create Registry config file
+# Create Docker registry config file
 cat <<EOF | sudo tee ${REGISTRY_CONFIG_DIR}/registry.yml > /dev/null
 version: 0.1
 log:
@@ -268,7 +348,7 @@ health:
     threshold: 3
 EOF
 
-# Create Registry service file
+# Create Docker registry service file
 cat <<EOF | sudo tee /etc/systemd/system/docker-registry.service > /dev/null
 [Unit]
 Description=Distribution Docker Registry
@@ -284,26 +364,23 @@ ExecStart=/usr/bin/registry serve ${REGISTRY_CONFIG_DIR}/registry.yml
 WantedBy=multi-user.target
 EOF
 
-# Reload systemd and start Registry service
+# Reload systemd and start Docker registry service
 sudo systemctl daemon-reload
 sudo systemctl enable docker-registry
 sudo systemctl start docker-registry
 
-# Wait for Registry to be reachable
-echo "Waiting for Registry to be reachable..."
+# Wait for Docker registry to be reachable
+echo "Waiting for Docker registry to be reachable..."
 while ! netcat -z 127.0.0.1 ${REGISTRY_PORT} > /dev/null 2>&1; do
   sleep 1
 done
 
-# Create Traefik group and user
-sudo groupadd -g 600 traefik
+# Create Traefik user
 sudo useradd \
-  -g traefik \
-  --no-user-group \
+  -U \
   --no-create-home \
   --shell /bin/false \
   --system \
-  --uid 600 \
   traefik
 
 # Create Traefik directories and set permissions
@@ -468,14 +545,14 @@ while ! netcat -z 127.0.0.1 443 > /dev/null 2>&1; do
   sleep 1
 done
 
-# Wait for Registry to be reachable over custom host
-echo "Waiting for Registry to be reachable on the public internet..."
+# Wait for Docker registry to be reachable over custom host
+echo "Waiting for Docker registry to be reachable on the public internet..."
 while ! curl -u ${DOCKER_REGISTRY_USER}:${DOCKER_REGISTRY_PASS} https://${DOCKER_REGISTRY_HOST}/ > /dev/null 2>&1; do
   sleep 1
 done
 
-# Login to Registry
-echo "Logging in to Registry..."
+# Login to Docker registry
+echo "Logging in to Docker registry..."
 docker login ${DOCKER_REGISTRY_HOST} -u ${DOCKER_REGISTRY_USER} --password-stdin <<< ${DOCKER_REGISTRY_PASS}
 
 echo " "
@@ -503,9 +580,9 @@ echo "Docker registry password: ${DOCKER_REGISTRY_PASS}"
 echo " "
 echo "----------------------------------------"
 echo " "
-echo "Nomad configuration: ${NOMAD_CONFIG_DIR}/nomad.hcl"
-echo "Consul configuration: ${CONSUL_CONFIG_DIR}/consul.hcl"
-echo "Traefik configuration: ${TRAEFIK_CONFIG_DIR}/traefik.yml"
-echo "Docker registry configuration: ${REGISTRY_CONFIG_DIR}/registry.yml"
+echo "Nomad config directory: ${NOMAD_CONFIG_DIR}"
+echo "Consul config directory: ${CONSUL_CONFIG_DIR}"
+echo "Traefik config directory: ${TRAEFIK_CONFIG_DIR}"
+echo "Docker registry config directory: ${REGISTRY_CONFIG_DIR}"
 echo " "
 echo "----------------------------------------"
