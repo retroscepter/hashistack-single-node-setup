@@ -44,104 +44,65 @@ sudo apt-get update
 sudo apt-get upgrade -y
 sudo apt-get install -y wget curl gpg coreutils ca-certificates jq apache2-utils
 
-# Add HashiCorp GPG key and repository
-wget -O- https://apt.releases.hashicorp.com/gpg | sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
-echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/hashicorp.list
-sudo apt-get update
-
-# Install Nomad and Consul
-sudo apt-get install -y nomad consul
-
-# Install Docker
+# Add dependency repositories
 sudo install -m 0755 -d /etc/apt/keyrings
-sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
-sudo chmod a+r /etc/apt/keyrings/docker.asc
-echo \
-  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
-  $(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}") stable" | \
-  sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+if [[ ! -f /etc/apt/keyrings/docker.asc ]]; then
+  sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+fi
+if [[ ! -f /usr/share/keyrings/hashicorp-archive-keyring.gpg ]]; then
+  wget -O- https://apt.releases.hashicorp.com/gpg | sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
+fi
+if [[ ! -f /etc/apt/sources.list.d/docker.list ]]; then
+  echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" \
+    | sudo tee /etc/apt/sources.list.d/docker.list
+fi
+if [[ ! -f /etc/apt/sources.list.d/hashicorp.list ]]; then
+  echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" \
+    | sudo tee /etc/apt/sources.list.d/hashicorp.list
+fi
 sudo apt-get update
-sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+sudo apt-get install -y nomad consul docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 
 # Install Registry
-mkdir -p ./registry
-wget -O ./registry/${REGISTRY_VERSION}.tar.gz https://github.com/distribution/distribution/releases/download/v${REGISTRY_VERSION}/registry_${REGISTRY_VERSION}_linux_amd64.tar.gz
-tar -xzvf ./registry/${REGISTRY_VERSION}.tar.gz -C ./registry
-sudo chmod +x ./registry/registry
-sudo mv ./registry/registry /usr/bin/
-rm -rf ./registry
+if [[ ! -f /usr/bin/registry ]]; then
+  mkdir -p ./registry && \
+    wget -qO- "https://github.com/distribution/distribution/releases/download/v${REGISTRY_VERSION}/registry_${REGISTRY_VERSION}_linux_amd64.tar.gz" | \
+    tar -xz -C ./registry && \
+    sudo install -m 755 ./registry/registry /usr/bin/ && \
+    rm -rf ./registry
+fi
 
 # Install Traefik
-mkdir -p ./traefik
-wget -O ./traefik/${TRAEFIK_VERSION}.tar.gz https://github.com/traefik/traefik/releases/download/v${TRAEFIK_VERSION}/traefik_v${TRAEFIK_VERSION}_linux_amd64.tar.gz
-tar -xzvf ./traefik/${TRAEFIK_VERSION}.tar.gz -C ./traefik
-sudo chmod +x ./traefik/traefik
-sudo mv ./traefik/traefik /usr/bin/
-rm -rf ./traefik
+if [[ ! -f /usr/bin/traefik ]]; then
+  mkdir -p ./traefik && \
+    wget -qO- "https://github.com/traefik/traefik/releases/download/v${TRAEFIK_VERSION}/traefik_v${TRAEFIK_VERSION}_linux_amd64.tar.gz" | \
+    tar -xz -C ./traefik && \
+    sudo install -m 755 ./traefik/traefik /usr/bin/ && \
+    rm -rf ./traefik
+fi
 
-# Disable systemd-resolved
-sudo systemctl stop systemd-resolved
-sudo systemctl disable systemd-resolved
+DOCKER_BRIDGE_IP_ADDRESS=(`ip -brief addr show docker0 | awk '{print $3}' | awk -F/ '{print $1}'`)
 
-# Create custom resolved.conf file
-cat <<EOF | sudo tee /etc/systemd/resolved.conf > /dev/null
-# This file is managed by man:systemd-resolved(8). Do not edit.
-#
-# This is a dynamic resolv.conf file for connecting local clients directly to
-# all known uplink DNS servers. This file lists all configured search domains.
-#
-# Third party programs must not access this file directly, but only through the
-# symlink at /etc/resolv.conf. To manage man:resolv.conf(5) in a different way,
-# replace this symlink by a static file or a different symlink.
-#
-# See man:systemd-resolved.service(8) for details about the supported modes of
-# operation for /etc/resolv.conf.
+if [ -z "${DOCKER_BRIDGE_IP_ADDRESS}" ]; then
+  echo "Failed to get Docker bridge IP address"
+  exit 1
+fi
 
-# Docker bridge ip
-nameserver 172.17.0.1
-nameserver 127.0.0.1
-nameserver 8.8.8.8
-nameserver 8.8.4.4
-EOF
-
-# Create custom resolv.conf file
-cat <<EOF | sudo tee /etc/resolv.conf > /dev/null
-#  This file is part of systemd.
-#
-#  systemd is free software; you can redistribute it and/or modify it
-#  under the terms of the GNU Lesser General Public License as published by
-#  the Free Software Foundation; either version 2.1 of the License, or
-#  (at your option) any later version.
-#
-# Entries in this file show the compile time defaults.
-# You can change settings by editing this file.
-# Defaults can be restored by simply deleting this file.
-#
-# See resolved.conf(5) for details
-
+# Configure systemd-resolved
+sudo mkdir -p /etc/systemd/resolved.conf.d
+cat <<EOF | sudo tee /etc/systemd/resolved.conf.d/consul.conf > /dev/null
 [Resolve]
-DNS=127.0.0.1
+DNS=127.0.0.1:8600
+DNSSEC=false
 Domains=~consul
-#FallbackDNS=
-#Domains=
-#LLMNR=no
-#MulticastDNS=no
-#DNSSEC=no
-#DNSOverTLS=no
-#Cache=no-negative
-DNSStubListener=yes
-#ReadEtcHosts=yes
+DNSStubListenerExtra=${DOCKER_BRIDGE_IP_ADDRESS}
 EOF
 
-# Create symlink to systemd-resolved
-sudo ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf
+sudo systemctl restart systemd-resolved
 
 # Create Consul configuration directory
-sudo mkdir -p ${CONSUL_CONFIG_DIR}
+sudo mkdir -p ${CONSUL_CONFIG_DIR} ${CONSUL_DATA_DIR}
 sudo chmod a+w ${CONSUL_CONFIG_DIR}
-
-# Create Consul data directory
-sudo mkdir -p ${CONSUL_DATA_DIR}
 sudo chmod 777 ${CONSUL_DATA_DIR}
 
 # Create Consul configuration file
@@ -154,12 +115,6 @@ data_dir = "${CONSUL_DATA_DIR}"
 
 bind_addr = "${PRIVATE_IP}"
 client_addr = "0.0.0.0"
-
-ports {
-  dns = 53
-}
-
-recursors = [ "8.8.8.8", "8.8.4.4" ]
 
 server = true
 ui = true
@@ -185,7 +140,6 @@ Requires=network-online.target
 After=network-online.target
 
 [Service]
-Environment=CONSUL_ALLOW_PRIVILEGED_PORTS=true
 ExecStart=/usr/bin/consul agent -config-dir=${CONSUL_CONFIG_DIR}
 ExecReload=/bin/kill -HUP \$MAINPID
 KillSignal=SIGTERM
@@ -238,27 +192,24 @@ sudo sed -i "s/CONSUL_DNS_SECRET_ID/${CONSUL_DNS_SECRET_ID}/g" ${CONSUL_CONFIG_D
 sudo systemctl restart consul
 
 # Create Nomad configuration directory
-sudo mkdir -p ${NOMAD_CONFIG_DIR}
+sudo mkdir -p ${NOMAD_CONFIG_DIR} ${NOMAD_DATA_DIR}
 sudo chmod a+w ${NOMAD_CONFIG_DIR}
-
-# Create Nomad data directory
-sudo mkdir -p ${NOMAD_DATA_DIR}
 sudo chmod 777 ${NOMAD_DATA_DIR}
 
 # Create Nomad configuration file
 cat <<EOF | sudo tee ${NOMAD_CONFIG_DIR}/nomad.hcl > /dev/null
-data_dir  = "${NOMAD_DATA_DIR}"
+data_dir = "${NOMAD_DATA_DIR}"
 bind_addr = "0.0.0.0"
 
 server {
-  enabled          = true
+  enabled = true
   bootstrap_expect = 1
 }
 
 client {
-  enabled       = true
+  enabled = true
   network_interface = "eth0"
-  servers       = ["127.0.0.1:4647"]
+  servers = ["127.0.0.1:4647"]
 }
 
 consul {
