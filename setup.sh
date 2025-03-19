@@ -19,9 +19,12 @@ TRAEFIK_VERSION="3.3.4"
 TRAEFIK_CONFIG_DIR="/etc/traefik"
 TRAEFIK_LOG_DIR="/var/log/traefik"
 
-# Get private IP
-PRIVATE_IP=$(hostname -I | awk '{print $1}')
+if [[ ! -f "/etc/debian_version" ]]; then
+  echo "This script only works on Debian systems"
+  exit 1
+fi
 
+PRIVATE_IP=$(hostname -I | awk '{print $1}')
 if [ -z "${PRIVATE_IP}" ]; then
   echo "Failed to get private IP"
   exit 1
@@ -39,21 +42,19 @@ read -p "Docker registry username: " DOCKER_REGISTRY_USER
 read -sp "Docker registry password: " DOCKER_REGISTRY_PASS
 echo
 
-# Update package lists and install prerequisites
 sudo apt-get update
 sudo apt-get upgrade -y
 sudo apt-get install -y wget curl gpg coreutils ca-certificates jq apache2-utils
 
-# Add dependency repositories
 sudo install -m 0755 -d /etc/apt/keyrings
 if [[ ! -f /etc/apt/keyrings/docker.asc ]]; then
-  sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+  sudo curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
 fi
 if [[ ! -f /usr/share/keyrings/hashicorp-archive-keyring.gpg ]]; then
   wget -O- https://apt.releases.hashicorp.com/gpg | sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
 fi
 if [[ ! -f /etc/apt/sources.list.d/docker.list ]]; then
-  echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" \
+  echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $(lsb_release -cs) stable" \
     | sudo tee /etc/apt/sources.list.d/docker.list
 fi
 if [[ ! -f /etc/apt/sources.list.d/hashicorp.list ]]; then
@@ -63,13 +64,14 @@ fi
 sudo apt-get update
 sudo apt-get install -y nomad consul docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 
-# Install Registry
 if [[ ! -f /usr/bin/registry ]]; then
   mkdir -p ./registry && \
     wget -qO- "https://github.com/distribution/distribution/releases/download/v${REGISTRY_VERSION}/registry_${REGISTRY_VERSION}_linux_amd64.tar.gz" | \
     tar -xz -C ./registry && \
     sudo install -m 755 ./registry/registry /usr/bin/ && \
     rm -rf ./registry
+else
+  echo "Registry already installed"
 fi
 
 # Install Traefik
@@ -79,16 +81,16 @@ if [[ ! -f /usr/bin/traefik ]]; then
     tar -xz -C ./traefik && \
     sudo install -m 755 ./traefik/traefik /usr/bin/ && \
     rm -rf ./traefik
+else
+  echo "Traefik already installed"
 fi
 
 DOCKER_BRIDGE_IP_ADDRESS=(`ip -brief addr show docker0 | awk '{print $3}' | awk -F/ '{print $1}'`)
-
 if [ -z "${DOCKER_BRIDGE_IP_ADDRESS}" ]; then
   echo "Failed to get Docker bridge IP address"
   exit 1
 fi
 
-# Configure systemd-resolved
 sudo mkdir -p /etc/systemd/resolved.conf.d
 cat <<EOF | sudo tee /etc/systemd/resolved.conf.d/consul.conf > /dev/null
 [Resolve]
@@ -100,12 +102,10 @@ EOF
 
 sudo systemctl restart systemd-resolved
 
-# Create Consul configuration directory
 sudo mkdir -p ${CONSUL_CONFIG_DIR} ${CONSUL_DATA_DIR}
 sudo chmod a+w ${CONSUL_CONFIG_DIR}
 sudo chmod 777 ${CONSUL_DATA_DIR}
 
-# Create Consul configuration file
 cat <<EOF | sudo tee ${CONSUL_CONFIG_DIR}/consul.hcl > /dev/null
 datacenter = "dc1"
 
@@ -132,7 +132,6 @@ acl = {
 }
 EOF
 
-# Create Consul service file
 cat <<EOF | sudo tee /etc/systemd/system/consul.service > /dev/null
 [Unit]
 Description=Consul Agent
@@ -150,53 +149,40 @@ LimitNOFILE=4096
 WantedBy=multi-user.target
 EOF
 
-# Reload systemd and start Consul service
 sudo systemctl daemon-reload
 sudo systemctl enable consul
 sudo systemctl start consul
 
-# Wait for Consul to be reachable
 echo "Waiting for Consul to be reachable..."
 while ! netcat -z 127.0.0.1 ${CONSUL_PORT} > /dev/null 2>&1; do
   sleep 1
 done
 
-# Wait for Consul cluster leader to be elected
 echo "Waiting for Consul cluster leader to be elected..."
 while ! consul kv get -recurse / > /dev/null 2>&1; do
   sleep 1
 done
 
-# Bootstrap Consul ACL and get bootstrap token
 CONSUL_SECRET_ID=$(consul acl bootstrap -format=json | jq -r '.SecretID')
-
 if [ -z "${CONSUL_SECRET_ID}" ]; then
   echo "Failed to bootstrap Consul ACL"
   exit 1
 fi
-
 echo ${CONSUL_SECRET_ID} >> ./consul-bootstrap-token.txt
-
 export CONSUL_HTTP_TOKEN=${CONSUL_SECRET_ID}
 
-# Create Consul DNS token
 CONSUL_DNS_SECRET_ID=$(consul acl token create -description "DNS Token" -format json -templated-policy "builtin/dns" | jq -r '.SecretID')
-
 if [ -z "${CONSUL_DNS_SECRET_ID}" ]; then
   echo "Failed to create Consul DNS token"
   exit 1
 fi
-
 sudo sed -i "s/CONSUL_DNS_SECRET_ID/${CONSUL_DNS_SECRET_ID}/g" ${CONSUL_CONFIG_DIR}/consul.hcl
-
 sudo systemctl restart consul
 
-# Create Nomad configuration directory
 sudo mkdir -p ${NOMAD_CONFIG_DIR} ${NOMAD_DATA_DIR}
 sudo chmod a+w ${NOMAD_CONFIG_DIR}
 sudo chmod 777 ${NOMAD_DATA_DIR}
 
-# Create Nomad configuration file
 cat <<EOF | sudo tee ${NOMAD_CONFIG_DIR}/nomad.hcl > /dev/null
 data_dir = "${NOMAD_DATA_DIR}"
 bind_addr = "0.0.0.0"
@@ -222,7 +208,6 @@ acl = {
 }
 EOF
 
-# Create Nomad service file
 cat <<EOF | sudo tee /etc/systemd/system/nomad.service > /dev/null
 [Unit]
 Description=Nomad Agent
@@ -240,18 +225,15 @@ LimitNOFILE=65536
 WantedBy=multi-user.target
 EOF
 
-# Reload systemd and start Nomad service
 sudo systemctl daemon-reload
 sudo systemctl enable nomad
 sudo systemctl start nomad
 
-# Wait for Nomad to be reachable
 echo "Waiting for Nomad to be reachable..."
 while ! netcat -z 127.0.0.1 ${NOMAD_PORT} > /dev/null 2>&1; do
   sleep 1
 done
 
-# Bootstrap Nomad ACL and get bootstrap token
 NOMAD_SECRET_ID=$(nomad acl bootstrap -json | jq -r '.SecretID')
 
 if [ -z "${NOMAD_SECRET_ID}" ]; then
@@ -261,7 +243,6 @@ fi
 
 echo ${NOMAD_SECRET_ID} >> ./nomad-bootstrap-token.txt
 
-# Create Docker registry user
 sudo useradd \
   -U \
   --no-create-home \
@@ -269,7 +250,6 @@ sudo useradd \
   --system \
   docker-registry
 
-# Create Docker registry directories and set permissions
 sudo mkdir -p ${REGISTRY_CONFIG_DIR}
 sudo chmod 755 ${REGISTRY_CONFIG_DIR}
 sudo chown -R docker-registry:docker-registry ${REGISTRY_CONFIG_DIR}
@@ -277,7 +257,6 @@ sudo mkdir -p ${REGISTRY_DATA_DIR}
 sudo chmod 755 ${REGISTRY_DATA_DIR}
 sudo chown -R docker-registry:docker-registry ${REGISTRY_DATA_DIR}
 
-# Create Docker registry config file
 cat <<EOF | sudo tee ${REGISTRY_CONFIG_DIR}/registry.yml > /dev/null
 version: 0.1
 log:
@@ -299,7 +278,6 @@ health:
     threshold: 3
 EOF
 
-# Create Docker registry service file
 cat <<EOF | sudo tee /etc/systemd/system/docker-registry.service > /dev/null
 [Unit]
 Description=Distribution Docker Registry
@@ -315,18 +293,15 @@ ExecStart=/usr/bin/registry serve ${REGISTRY_CONFIG_DIR}/registry.yml
 WantedBy=multi-user.target
 EOF
 
-# Reload systemd and start Docker registry service
 sudo systemctl daemon-reload
 sudo systemctl enable docker-registry
 sudo systemctl start docker-registry
 
-# Wait for Docker registry to be reachable
 echo "Waiting for Docker registry to be reachable..."
 while ! netcat -z 127.0.0.1 ${REGISTRY_PORT} > /dev/null 2>&1; do
   sleep 1
 done
 
-# Create Traefik user
 sudo useradd \
   -U \
   --no-create-home \
@@ -334,7 +309,6 @@ sudo useradd \
   --system \
   traefik
 
-# Create Traefik directories and set permissions
 sudo mkdir -p ${TRAEFIK_CONFIG_DIR}
 sudo chmod 755 ${TRAEFIK_CONFIG_DIR}
 sudo chown -R traefik:traefik ${TRAEFIK_CONFIG_DIR}
@@ -342,7 +316,6 @@ sudo mkdir -p ${TRAEFIK_LOG_DIR}
 sudo chmod 755 ${TRAEFIK_LOG_DIR}
 sudo chown -R traefik:traefik ${TRAEFIK_LOG_DIR}
 
-# Create Traefik config file
 cat <<EOF | sudo tee ${TRAEFIK_CONFIG_DIR}/traefik.yml > /dev/null
 entryPoints:
   web:
@@ -387,7 +360,6 @@ log:
   level: DEBUG
 EOF
 
-# Create Traefik routes.yml config
 cat <<EOF | sudo tee ${TRAEFIK_CONFIG_DIR}/routes.yml > /dev/null
 http:
   routers:
@@ -439,15 +411,12 @@ http:
       compress: {}
 EOF
 
-# Hash Traefik dashboard password and write to file
 hashed_password=$(htpasswd -bnBC 10 "" "${TRAEFIK_DASHBOARD_PASS}" | tr -d ':\n')
 echo "${TRAEFIK_DASHBOARD_USER}:${hashed_password}" | sudo tee ${TRAEFIK_CONFIG_DIR}/dashboard-users > /dev/null
 
-# Hash Docker registry password and write to file
 hashed_password=$(htpasswd -bnBC 10 "" "${DOCKER_REGISTRY_PASS}" | tr -d ':\n')
 echo "${DOCKER_REGISTRY_USER}:${hashed_password}" | sudo tee ${TRAEFIK_CONFIG_DIR}/docker-registry-users > /dev/null
 
-# Create Traefik service file
 cat <<EOF | sudo tee /etc/systemd/system/traefik.service > /dev/null
 [Unit]
 Description="Traefik Proxy"
@@ -473,36 +442,30 @@ NoNewPrivileges=true
 WantedBy=multi-user.target
 EOF
 
-# Open necessary firewall ports
 sudo ufw allow ssh
 sudo ufw allow http
 sudo ufw allow https
 sudo ufw --force enable
 
-# Reload systemd and start Traefik service
 sudo systemctl daemon-reload
 sudo systemctl enable traefik
 sudo systemctl start traefik
 
-# Wait for Traefik HTTP to be reachable
 echo "Waiting for Traefik HTTP to be reachable..."
 while ! netcat -z 127.0.0.1 80 > /dev/null 2>&1; do
   sleep 1
 done
 
-# Wait for Traefik HTTPS to be reachable
 echo "Waiting for Traefik HTTPS to be reachable..."
 while ! netcat -z 127.0.0.1 443 > /dev/null 2>&1; do
   sleep 1
 done
 
-# Wait for Docker registry to be reachable over custom host
 echo "Waiting for Docker registry to be reachable on the public internet..."
 while ! curl -u ${DOCKER_REGISTRY_USER}:${DOCKER_REGISTRY_PASS} https://${DOCKER_REGISTRY_HOST}/ > /dev/null 2>&1; do
   sleep 1
 done
 
-# Login to Docker registry
 echo "Logging in to Docker registry..."
 docker login ${DOCKER_REGISTRY_HOST} -u ${DOCKER_REGISTRY_USER} --password-stdin <<< ${DOCKER_REGISTRY_PASS}
 
