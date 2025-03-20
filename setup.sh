@@ -2,7 +2,9 @@
 
 set -e
 
-CONSUL_PORT=8500
+export DEBIAN_FRONTEND=noninteractive
+
+CONSUL_HTTP_PORT=8500
 CONSUL_CONFIG_DIR="/etc/consul.d"
 CONSUL_DATA_DIR="/opt/consul/data"
 
@@ -18,6 +20,8 @@ REGISTRY_DATA_DIR="/opt/registry/data"
 TRAEFIK_VERSION="3.3.4"
 TRAEFIK_CONFIG_DIR="/etc/traefik"
 TRAEFIK_LOG_DIR="/var/log/traefik"
+
+CNI_PLUGINS_VERSION="1.6.2"
 
 if [[ ! -f "/etc/debian_version" ]]; then
   echo "This script only works on Debian systems"
@@ -44,7 +48,7 @@ echo
 
 sudo apt-get update
 sudo apt-get upgrade -y
-sudo apt-get install -y wget curl gpg coreutils ca-certificates jq apache2-utils
+sudo apt-get install -y wget curl gpg coreutils ca-certificates jq apache2-utils netcat-traditional dnsutils ufw
 
 sudo install -m 0755 -d /etc/apt/keyrings
 if [[ ! -f /etc/apt/keyrings/docker.asc ]]; then
@@ -74,7 +78,6 @@ else
   echo "Registry already installed"
 fi
 
-# Install Traefik
 if [[ ! -f /usr/bin/traefik ]]; then
   mkdir -p ./traefik && \
     wget -qO- "https://github.com/traefik/traefik/releases/download/v${TRAEFIK_VERSION}/traefik_v${TRAEFIK_VERSION}_linux_amd64.tar.gz" | \
@@ -85,49 +88,58 @@ else
   echo "Traefik already installed"
 fi
 
+if [[ ! -f /opt/cni/bin/cni-plugins ]]; then
+  curl -L -o cni-plugins.tgz "https://github.com/containernetworking/plugins/releases/download/v${CNI_PLUGINS_VERSION}/cni-plugins-linux-amd64-v${CNI_PLUGINS_VERSION}.tgz"
+  sudo mkdir -p /opt/cni/bin
+  sudo tar -C /opt/cni/bin -xzf cni-plugins.tgz
+else
+  echo "CNI plugins already installed"
+fi
+
 DOCKER_BRIDGE_IP_ADDRESS=(`ip -brief addr show docker0 | awk '{print $3}' | awk -F/ '{print $1}'`)
 if [ -z "${DOCKER_BRIDGE_IP_ADDRESS}" ]; then
   echo "Failed to get Docker bridge IP address"
   exit 1
 fi
 
-sudo mkdir -p /etc/systemd/resolved.conf.d
-cat <<EOF | sudo tee /etc/systemd/resolved.conf.d/consul.conf > /dev/null
-[Resolve]
-DNS=127.0.0.1:8600
-DNSSEC=false
-Domains=~consul
-DNSStubListenerExtra=${DOCKER_BRIDGE_IP_ADDRESS}
-EOF
+sudo systemctl stop systemd-resolved
+sudo systemctl disable systemd-resolved
 
-sudo systemctl restart systemd-resolved
+echo "127.0.0.1 $(hostname)" | sudo tee --append /etc/hosts
+
+echo "nameserver $DOCKER_BRIDGE_IP_ADDRESS" | sudo tee /etc/resolv.conf.new
+cat /etc/resolv.conf | sudo tee --append /etc/resolv.conf.new
+sudo mv /etc/resolv.conf.new /etc/resolv.conf
 
 sudo mkdir -p ${CONSUL_CONFIG_DIR} ${CONSUL_DATA_DIR}
 sudo chmod a+w ${CONSUL_CONFIG_DIR}
 sudo chmod 777 ${CONSUL_DATA_DIR}
 
 cat <<EOF | sudo tee ${CONSUL_CONFIG_DIR}/consul.hcl > /dev/null
-datacenter = "dc1"
-
-log_level = "INFO"
-
-data_dir = "${CONSUL_DATA_DIR}"
-
-bind_addr = "${PRIVATE_IP}"
+advertise_addr = "${PRIVATE_IP}"
+bind_addr = "0.0.0.0"
 client_addr = "0.0.0.0"
-
+data_dir = "${CONSUL_DATA_DIR}"
+log_level = "INFO"
+ports = {
+  dns = 53
+}
+recursors = [
+  "8.8.8.8",
+  "8.8.4.4"
+]
 server = true
-ui = true
-
+ui_config = {
+  enabled = true
+}
 bootstrap = true
-
 acl = {
   enabled = true
   default_policy = "deny"
   enable_token_persistence = true
-
   tokens {
     dns = "CONSUL_DNS_SECRET_ID"
+    agent = "CONSUL_AGENT_SECRET_ID"
   }
 }
 EOF
@@ -154,7 +166,7 @@ sudo systemctl enable consul
 sudo systemctl start consul
 
 echo "Waiting for Consul to be reachable..."
-while ! netcat -z 127.0.0.1 ${CONSUL_PORT} > /dev/null 2>&1; do
+while ! netcat -z 127.0.0.1 ${CONSUL_HTTP_PORT} > /dev/null 2>&1; do
   sleep 1
 done
 
@@ -176,7 +188,9 @@ if [ -z "${CONSUL_DNS_SECRET_ID}" ]; then
   echo "Failed to create Consul DNS token"
   exit 1
 fi
+
 sudo sed -i "s/CONSUL_DNS_SECRET_ID/${CONSUL_DNS_SECRET_ID}/g" ${CONSUL_CONFIG_DIR}/consul.hcl
+sudo sed -i "s/CONSUL_AGENT_SECRET_ID/${CONSUL_SECRET_ID}/g" ${CONSUL_CONFIG_DIR}/consul.hcl
 sudo systemctl restart consul
 
 sudo mkdir -p ${NOMAD_CONFIG_DIR} ${NOMAD_DATA_DIR}
@@ -186,23 +200,19 @@ sudo chmod 777 ${NOMAD_DATA_DIR}
 cat <<EOF | sudo tee ${NOMAD_CONFIG_DIR}/nomad.hcl > /dev/null
 data_dir = "${NOMAD_DATA_DIR}"
 bind_addr = "0.0.0.0"
-
 server {
   enabled = true
   bootstrap_expect = 1
 }
-
 client {
   enabled = true
   network_interface = "eth0"
   servers = ["127.0.0.1:4647"]
 }
-
 consul {
-  address = "${PRIVATE_IP}:${CONSUL_PORT}"
+  address = "0.0.0.0:${CONSUL_HTTP_PORT}"
   token = "${CONSUL_SECRET_ID}"
 }
-
 acl = {
   enabled = true
 }
@@ -235,12 +245,10 @@ while ! netcat -z 127.0.0.1 ${NOMAD_PORT} > /dev/null 2>&1; do
 done
 
 NOMAD_SECRET_ID=$(nomad acl bootstrap -json | jq -r '.SecretID')
-
 if [ -z "${NOMAD_SECRET_ID}" ]; then
   echo "Failed to bootstrap Nomad ACL"
   exit 1
 fi
-
 echo ${NOMAD_SECRET_ID} >> ./nomad-bootstrap-token.txt
 
 sudo useradd \
@@ -333,7 +341,7 @@ providers:
     filename: ${TRAEFIK_CONFIG_DIR}/routes.yml
   consulCatalog:
     endpoint:
-      address: "127.0.0.1:${CONSUL_PORT}"
+      address: "127.0.0.1:${CONSUL_HTTP_PORT}"
       token: "${CONSUL_SECRET_ID}"
     exposedByDefault: false
 
@@ -395,7 +403,7 @@ http:
     consul:
       loadBalancer:
         servers:
-          - url: "http://127.0.0.1:${CONSUL_PORT}/"
+          - url: "http://127.0.0.1:${CONSUL_HTTP_PORT}/"
     docker-registry:
       loadBalancer:
         servers:
@@ -445,6 +453,7 @@ EOF
 sudo ufw allow ssh
 sudo ufw allow http
 sudo ufw allow https
+sudo ufw allow dns
 sudo ufw --force enable
 
 sudo systemctl daemon-reload

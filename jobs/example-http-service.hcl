@@ -1,24 +1,26 @@
-job "example-http-service" {
+job "hello-world" {
   datacenters = ["dc1"]
   type = "service"
   
-  group "example-http" {
+  group "hello-world" {
     count = 1
 
     network {
+      mode = "bridge"
+
       port "http" {
         to = 80
       }
     }
 
     service {
-      name = "example-http-service"
+      name = "hello-world"
       port = "http"
 
       tags = [
         "traefik.enable=true",
-        "traefik.http.routers.example-http-service.entryPoints=http",
-        "traefik.http.routers.example-http-service.rule=Path(`/example-http-service`)"
+        "traefik.http.routers.hello-world.entryPoints=http",
+        "traefik.http.routers.hello-world.rule=Path(`/hello-world`)"
       ]
 
       check {
@@ -26,6 +28,7 @@ job "example-http-service" {
         path     = "/"
         interval = "30s"
         timeout  = "2s"
+        port     = "http"
       }
     }
 
@@ -33,17 +36,13 @@ job "example-http-service" {
       driver = "docker"
 
       config {
-        image = "nginx:latest"
+        image = "nginx"
         ports = ["http"]
       }
 
       resources {
         cpu    = 500
         memory = 256
-      }
-
-      env = {
-        "EXAMPLE_VAR" = "example_value"
       }
     }
   }
