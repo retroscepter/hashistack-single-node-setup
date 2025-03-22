@@ -206,7 +206,6 @@ server {
 }
 client {
   enabled = true
-  network_interface = "eth0"
   servers = ["127.0.0.1:4647"]
 }
 consul {
