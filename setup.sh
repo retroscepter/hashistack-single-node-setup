@@ -215,6 +215,13 @@ consul {
 acl = {
   enabled = true
 }
+plugin "docker" {
+  config {
+    auth {
+      config = "${NOMAD_CONFIG_DIR}/docker-auth.json"
+    }
+  }
+}
 EOF
 
 cat <<EOF | sudo tee /etc/systemd/system/nomad.service > /dev/null
@@ -476,6 +483,7 @@ done
 
 echo "Logging in to Docker registry..."
 docker login ${DOCKER_REGISTRY_HOST} -u ${DOCKER_REGISTRY_USER} --password-stdin <<< ${DOCKER_REGISTRY_PASS}
+cp ~/.docker/config.json ${NOMAD_CONFIG_DIR}/docker-auth.json
 
 echo " "
 echo "----------------------------------------"
