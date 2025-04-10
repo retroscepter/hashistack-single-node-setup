@@ -189,6 +189,64 @@ if [ -z "${CONSUL_DNS_SECRET_ID}" ]; then
   exit 1
 fi
 
+cat <<EOF | sudo tee ./consul-policy-nomad-agents.hcl > /dev/null
+agent_prefix "" {
+  policy = "read"
+}
+
+node_prefix "" {
+  policy = "write"
+}
+
+service_prefix "" {
+  policy = "write"
+}
+EOF
+
+cat <<EOF | sudo tee ./consul-policy-nomad-tasks.hcl > /dev/null
+key_prefix "" {
+  policy = "read"
+}
+
+node_prefix "" {
+  policy = "read"
+}
+
+service_prefix "" {
+  policy = "read"
+}
+EOF
+
+consul acl policy create -name 'nomad-agents' -description 'Nomad agents' -rules '@consul-policy-nomad-agents.hcl'
+consul acl policy create -name 'nomad-tasks' -description 'Nomad tasks' -rules '@consul-policy-nomad-tasks.hcl'
+
+CONSUL_NOMAD_AGENTS_SECRET_ID=$(consul acl token create -policy-name 'nomad-agents' -format json | jq -r '.SecretID')
+if [ -z "${CONSUL_NOMAD_AGENTS_SECRET_ID}" ]; then
+  echo "Failed to create Consul Nomad agents token"
+  exit 1
+fi
+
+cat <<EOF | sudo tee ./consul-auth-method-nomad-workloads.json > /dev/null
+{
+  "JWKSURL": "http://0.0.0.0:${CONSUL_HTTP_PORT}/.well-known/jwks.json",
+  "JWTSupportedAlgs": ["RS256"],
+  "BoundAudiences": ["consul.io"],
+  "ClaimMappings": {
+    "nomad_namespace": "nomad_namespace",
+    "nomad_job_id": "nomad_job_id",
+    "nomad_task": "nomad_task",
+    "nomad_service": "nomad_service"
+  }
+}
+EOF
+
+consul acl auth-method create -name 'nomad-workloads' -type 'jwt' -description 'Nomad services and workloads' -config '@consul-auth-method-nomad-workloads.json'
+
+consul acl binding-rule create -method 'nomad-workloads' -description 'Services registered from Nomad' -bind-type 'service' -bind-name '${value.nomad_service}' -selector '"nomad_service" in value'
+consul acl binding-rule create -method 'nomad-workloads' -description 'Nomad tasks' -bind-type 'role' -bind-name 'nomad-tasks-${value.nomad_namespace}' -selector '"nomad_service" not in value'
+
+consul acl role create -name 'nomad-tasks-default' -description 'Nomad tasks in the "default" namespace' -policy-name 'nomad-tasks'
+
 sudo sed -i "s/CONSUL_DNS_SECRET_ID/${CONSUL_DNS_SECRET_ID}/g" ${CONSUL_CONFIG_DIR}/consul.hcl
 sudo sed -i "s/CONSUL_AGENT_SECRET_ID/${CONSUL_SECRET_ID}/g" ${CONSUL_CONFIG_DIR}/consul.hcl
 sudo systemctl restart consul
@@ -210,7 +268,17 @@ client {
 }
 consul {
   address = "0.0.0.0:${CONSUL_HTTP_PORT}"
-  token = "${CONSUL_SECRET_ID}"
+  token = "${CONSUL_NOMAD_AGENTS_SECRET_ID}"
+
+  service_identity {
+    aud = ["consul.io"]
+    ttl = "1h"
+  }
+
+  task_identity {
+    aud = ["consul.io"]
+    ttl = "1h"
+  }
 }
 acl = {
   enabled = true
