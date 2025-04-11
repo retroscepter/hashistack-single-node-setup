@@ -5,6 +5,7 @@ set -e
 export DEBIAN_FRONTEND=noninteractive
 
 CONSUL_HTTP_PORT=8500
+CONSUL_GRPC_PORT=8502
 CONSUL_CONFIG_DIR="/etc/consul.d"
 CONSUL_DATA_DIR="/opt/consul/data"
 
@@ -22,6 +23,7 @@ TRAEFIK_CONFIG_DIR="/etc/traefik"
 TRAEFIK_LOG_DIR="/var/log/traefik"
 
 CNI_PLUGINS_VERSION="1.6.2"
+CONSUL_CNI_PLUGIN_VERSION="1.6.3"
 
 if [[ ! -f "/etc/debian_version" ]]; then
   echo "This script only works on Debian systems"
@@ -48,7 +50,7 @@ echo
 
 sudo apt-get update
 sudo apt-get upgrade -y
-sudo apt-get install -y wget curl gpg coreutils ca-certificates jq apache2-utils netcat-traditional dnsutils ufw
+sudo apt-get install -y wget curl gpg coreutils ca-certificates jq apache2-utils netcat-traditional dnsutils ufw unzip
 
 sudo install -m 0755 -d /etc/apt/keyrings
 if [[ ! -f /etc/apt/keyrings/docker.asc ]]; then
@@ -96,6 +98,15 @@ else
   echo "CNI plugins already installed"
 fi
 
+if [[ ! -f /opt/cni/bin/consul-cni ]]; then
+  wget -q "https://releases.hashicorp.com/consul-cni/1.6.3/consul-cni_1.6.3_linux_amd64.zip" -O consul-cni.zip && \
+    sudo unzip consul-cni.zip -d /opt/cni/bin/ && \
+    sudo chmod +x /opt/cni/bin/consul-cni && \
+    rm consul-cni.zip
+else
+  echo "Consul CNI plugin already installed"
+fi
+
 DOCKER_BRIDGE_IP_ADDRESS=(`ip -brief addr show docker0 | awk '{print $3}' | awk -F/ '{print $1}'`)
 if [ -z "${DOCKER_BRIDGE_IP_ADDRESS}" ]; then
   echo "Failed to get Docker bridge IP address"
@@ -123,6 +134,7 @@ data_dir = "${CONSUL_DATA_DIR}"
 log_level = "INFO"
 ports = {
   dns = 53
+  grpc = ${CONSUL_GRPC_PORT}
 }
 recursors = [
   "8.8.8.8",
@@ -141,6 +153,9 @@ acl = {
     dns = "CONSUL_DNS_SECRET_ID"
     agent = "CONSUL_AGENT_SECRET_ID"
   }
+}
+connect = {
+  enabled = true
 }
 EOF
 
@@ -268,6 +283,7 @@ client {
 }
 consul {
   address = "0.0.0.0:${CONSUL_HTTP_PORT}"
+  grpc_addr = "0.0.0.0:${CONSUL_GRPC_PORT}"
   token = "${CONSUL_NOMAD_AGENTS_SECRET_ID}"
 
   service_identity {
